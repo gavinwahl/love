@@ -74,7 +74,7 @@ class Service(object):
         elif location.scheme == 'https':
             connection = HTTPSConnection(location.netloc or self.domain_hint)
         else:
-            raise NotImplemented
+            raise NotImplementedError('Only HTTP and HTTPS are supported')
         connection.request('GET', format_path(location, params), headers = headers)
         return connection.getresponse()
     
