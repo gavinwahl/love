@@ -1,7 +1,8 @@
-from urlparse import urlparse
+from urlparse import urlparse, ParseResult
 from httplib import HTTPConnection, HTTPSConnection
 import urllib
 import re
+from lxml import etree
 
 
 def format_path(parsed, data = {}):
@@ -30,7 +31,23 @@ def format_path(parsed, data = {}):
 
 def find_link(link, response):
     header = response.getheader('Link')
-    return parse_link_header(header)[link]
+    try:
+      return parse_link_header(header)[link]
+    except KeyError:
+      # not in the header
+      encoding = encoding_from_content_type(response.getheader('Content-Type'))
+      xml = etree.parse(response.read(), encoding = encoding)
+      return xml.xpath('//link[@rel="%s"]/@href' % link)
+
+encoding_re = re.compile("charset\s*=\s*(\S+)(;|$)")
+def encoding_from_content_type(content_type):
+    if not content_type:
+        return None
+    match = encoding_re.match(content_type)
+    if match:
+        return match.group(1)
+    else:
+        return None
 
 link_re = re.compile('\s*<([^>]+)>;\s*rel\s*="([^"]+)"')
 def parse_link_header(header):
@@ -48,7 +65,21 @@ def parse_link_header(header):
         match = link_re.match(piece)
         res[match.group(2)] = match.group(1)
     return res
-        
+
+
+def absolute_url(relative, base):
+    base = urlparse(base)
+    relative = urlparse(relative)
+
+    scheme = relative.scheme or base.scheme
+    netloc = relative.netloc or base.netloc
+
+    if not relative.path.startswith('/'):
+        path = base.path + "/" + relative.path
+    else:
+        path = relative.path
+
+    return ParseResult(scheme=scheme, netloc=netloc, path=path, params=relative.params, query=relative.query, fragment=relative.fragment).geturl()
 
 class Service(object):
     """
@@ -63,12 +94,13 @@ class Service(object):
     True
     """
 
-    def __init__(self, url, domain_hint = None):
+    def __init__(self, url, filter = None):
         self.url = url
-        self.domain_hint = domain_hint
+        self.filter = filter
 
-    def get(self, params = {}, headers = {}):
+    def get(self, params = {}, headers = {}, path = None, namespaces = {}):
         location = urlparse(self.url)
+
         if location.scheme == 'http':
             connection = HTTPConnection(location.netloc or self.domain_hint)
         elif location.scheme == 'https':
@@ -76,11 +108,37 @@ class Service(object):
         else:
             raise NotImplementedError('Only HTTP and HTTPS are supported')
         connection.request('GET', format_path(location, params), headers = headers)
-        return connection.getresponse()
-    
-    def __getattr__(self, link):
+        resp = connection.getresponse()
+        if path:
+            return etree.parse(resp).xpath(path, namespaces = namespaces)
+        else:
+            return resp
+
+    def find(self, xpath):
+      return Service(self.url, filter=xpath)
+
+    def find_link(self, link, response):
+        header = response.getheader('Link')
+        try:
+          return parse_link_header(header)[link]
+        except KeyError:
+          # not in the header
+          xml = [etree.parse(response)]
+          if self.filter:
+              xml = xml[0].xpath(self.filter)
+          result = []
+          for node in xml:
+              # what's the right way to handle namespaces here?
+              result.extend(node.xpath('//*[local-name()="link" and @rel="%s"]/@href' % link))
+          return result[0]
+
+
+    def follow_link(self, link):
         """
         Retrieve the resource, and follow the appropriate link
         """
         response = self.get()
-        return Service(find_link(link, response), self.domain_hint)
+        link = self.find_link(link, response)
+        return Service(absolute_url(link, self.url))
+
+    __getattr__ = follow_link
