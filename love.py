@@ -41,13 +41,17 @@ def find_link(link, response):
 
 encoding_re = re.compile("charset\s*=\s*(\S+)(;|$)")
 def encoding_from_content_type(content_type):
+    """
+    Extracts the charset from a Content-Type header.
+
+    >>> encoding_from_content_type('text/html; charset=utf-8')
+    'utf-8'
+    """
+
     if not content_type:
         return None
-    match = encoding_re.match(content_type)
-    if match:
-        return match.group(1)
-    else:
-        return None
+    match = encoding_re.search(content_type)
+    return match and match.group(1) or None
 
 link_re = re.compile('\s*<([^>]+)>;\s*rel\s*="([^"]+)"')
 def parse_link_header(header):
