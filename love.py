@@ -29,23 +29,15 @@ def format_path(parsed, data = {}):
         url += '?' + '&'.join(params)
     return url
 
-def find_link(link, response):
-    header = response.getheader('Link')
-    try:
-      return parse_link_header(header)[link]
-    except KeyError:
-      # not in the header
-      encoding = encoding_from_content_type(response.getheader('Content-Type'))
-      xml = etree.parse(response.read(), encoding = encoding)
-      return xml.xpath('//link[@rel="%s"]/@href' % link)
-
-encoding_re = re.compile("charset\s*=\s*(\S+)(;|$)")
+encoding_re = re.compile("charset\s*=\s*(\S+?)(;|$)")
 def encoding_from_content_type(content_type):
     """
     Extracts the charset from a Content-Type header.
 
     >>> encoding_from_content_type('text/html; charset=utf-8')
     'utf-8'
+    >>> encoding_from_content_type('text/html')
+    >>>
     """
 
     if not content_type:
@@ -98,51 +90,94 @@ class Service(object):
     True
     """
 
-    def __init__(self, url, filter = None):
+    def __init__(self, url, filter = None, namespaces = {}):
         self.url = url
         self.filter = filter
+        self.namespaces = namespaces
 
-    def get(self, params = {}, headers = {}, path = None, namespaces = {}):
+    def get(self, params = {}, headers = {}):
         location = urlparse(self.url)
 
         if location.scheme == 'http':
-            connection = HTTPConnection(location.netloc or self.domain_hint)
+            connection = HTTPConnection(location.netloc)
         elif location.scheme == 'https':
-            connection = HTTPSConnection(location.netloc or self.domain_hint)
+            connection = HTTPSConnection(location.netloc)
         else:
             raise NotImplementedError('Only HTTP and HTTPS are supported')
         connection.request('GET', format_path(location, params), headers = headers)
         resp = connection.getresponse()
-        if path:
-            return etree.parse(resp).xpath(path, namespaces = namespaces)
-        else:
-            return resp
+        return Representation.factory(resp, self)
 
     def find(self, xpath):
-      return Service(self.url, filter=xpath)
-
-    def find_link(self, link, response):
-        header = response.getheader('Link')
-        try:
-          return parse_link_header(header)[link]
-        except KeyError:
-          # not in the header
-          xml = [etree.parse(response)]
-          if self.filter:
-              xml = xml[0].xpath(self.filter)
-          result = []
-          for node in xml:
-              # what's the right way to handle namespaces here?
-              result.extend(node.xpath('//*[local-name()="link" and @rel="%s"]/@href' % link))
-          return result[0]
-
+      return Service(self.url, filter=xpath, namespaces=self.namespaces)
 
     def follow_link(self, link):
         """
-        Retrieve the resource, and follow the appropriate link
+        Retrieve the resource and follow the appropriate link.
         """
         response = self.get()
-        link = self.find_link(link, response)
-        return Service(absolute_url(link, self.url))
+        link = response.find_link(link, self.filter)
+        return Service(absolute_url(link, self.url), namespaces = self.namespaces)
 
     __getattr__ = follow_link
+
+
+class Representation(object):
+
+    @staticmethod
+    def mime_type(response):
+        if response.getheader('Content-Type'):
+            return response.getheader('Content-Type').partition(';')[0]
+        else:
+            return None
+
+    @staticmethod
+    def factory(response, service):
+        if Representation.mime_type(response) in ['application/xml', 'application/atom+xml']:
+            return XMLRepresentation(response, service.namespaces)
+        else:
+            return Representation(response)
+
+    def __init__(self, response):
+        self.response = response
+        self.getheader = response.getheader
+        self.getheaders = response.getheaders
+
+        self.encoding = encoding_from_content_type(self.getheader('Content-Type'))
+
+    def find_link(self, link, filter=None):
+        header = self.getheader('Link')
+        return parse_link_header(header)[link]
+
+    def read(self, count=None):
+        data = self.response.read(count)
+        if self.encoding:
+            return unicode(data, self.encoding)
+        else:
+            return data
+
+
+class XMLRepresentation(Representation):
+
+    def __init__(self, response, namespaces = {}):
+        super(XMLRepresentation, self).__init__(response)
+        self.parsed = etree.parse(self)
+        self.namespaces = namespaces
+
+    def xpath(self, path):
+        return self.parsed.xpath(path, namespaces = self.namespaces)
+
+    def find_link(self, link, filter=None):
+        try:
+            super(XMLRepresentation, self).find_link(link)
+        except KeyError:
+            xml = [self.parsed]
+            if filter:
+                xml = self.xpath(filter)
+            else:
+                xml = [self]
+            result = []
+            for node in xml:
+                # what's the right way to handle namespaces here?
+                result.extend(node.xpath('//*[local-name()="link" and @rel="%s"]/@href' % link))
+            return result[0]
