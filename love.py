@@ -98,12 +98,14 @@ class Service(object):
     True
     """
 
-    def __init__(self, url, filter = None):
+    def __init__(self, url, filter = None, persistant_headers = {}):
         self.url = url
         self.filter = filter
+        self.persistant_headers = persistant_headers
 
     def get(self, params = {}, headers = {}, path = None, namespaces = {}):
         location = urlparse(self.url)
+
 
         if location.scheme == 'http':
             connection = HTTPConnection(location.netloc or self.domain_hint)
@@ -111,6 +113,7 @@ class Service(object):
             connection = HTTPSConnection(location.netloc or self.domain_hint)
         else:
             raise NotImplementedError('Only HTTP and HTTPS are supported')
+        headers = dict(headers.items() + self.persistant_headers.items())
         connection.request('GET', format_path(location, params), headers = headers)
         resp = connection.getresponse()
         if path:
@@ -119,7 +122,7 @@ class Service(object):
             return resp
 
     def find(self, xpath):
-      return Service(self.url, filter=xpath)
+      return Service(self.url, filter=xpath, persistant_headers=self.persistant_headers)
 
     def find_link(self, link, response):
         header = response.getheader('Link')
@@ -143,6 +146,6 @@ class Service(object):
         """
         response = self.get()
         link = self.find_link(link, response)
-        return Service(absolute_url(link, self.url))
+        return Service(absolute_url(link, self.url), persistant_headers=self.persistant_headers)
 
     __getattr__ = follow_link
